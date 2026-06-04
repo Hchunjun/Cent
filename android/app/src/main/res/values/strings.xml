@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Cent</string>
+    <string name="title_activity_main">Cent</string>
+    <string name="package_name">work.linkai.cent</string>
+    <string name="custom_url_scheme">work.linkai.cent</string>
+</resources>

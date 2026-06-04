@@ -16,6 +16,7 @@ dist-ssr
 .env
 .env.*
 !.env.example
+*.keystore
 
 # Editor directories and files
 !.vscode/extensions.json
