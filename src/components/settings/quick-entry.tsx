@@ -8,7 +8,9 @@ import PopupLayout from "@/layouts/popup-layout";
 import { useIntl } from "@/locale";
 import { useLedgerStore } from "@/store/ledger";
 import { usePreferenceStore } from "@/store/preference";
+import { decodeApiKey } from "@/utils/api-key";
 import { generateSymmetricKey } from "@/utils/encrypt";
+import { getAIConfig } from "../assistant/request";
 import {
     getCategoriesStr,
     textToBillSystemPrompt,
@@ -17,12 +19,38 @@ import createConfirmProvider from "../confirm";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
+import autojs6QuickBillScript from "./autojs6-quick-bill-template.js?raw";
 
 /**
  * 生成随机字符串（用于 passcode）
  */
 function generateRandomPasscode(): string {
     return `relayr-${v4()}`;
+}
+
+function buildOpenAIChatUrl(apiUrl: string): string {
+    const normalizedUrl = apiUrl.trim().replace(/\/+$/, "");
+    if (!normalizedUrl) return "";
+    if (normalizedUrl.endsWith("/chat/completions")) {
+        return normalizedUrl;
+    }
+    return `${normalizedUrl}/chat/completions`;
+}
+
+function replaceScriptStringConfig(
+    script: string,
+    key: string,
+    value: string,
+): string {
+    const pattern = new RegExp(
+        `(${key}:\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*')`,
+        "m",
+    );
+    const nextScript = script.replace(pattern, `$1${JSON.stringify(value)}`);
+    if (nextScript === script) {
+        throw new Error(`AutoJS6 template missing ${key}`);
+    }
+    return nextScript;
 }
 
 function Form({ onCancel }: { onCancel?: () => void }) {
@@ -93,6 +121,73 @@ function Form({ onCancel }: { onCancel?: () => void }) {
                 passcode: value,
             },
         }));
+    };
+    const buildQuickEntryConfigText = () => {
+        const prompt = textToBillSystemPrompt(getCategoriesStr(), false);
+        return JSON.stringify({
+            passcode: secret,
+            prompt,
+            relayrURL: import.meta.env.VITE_RELAYR_URL,
+            encryptKey: relayrConfig?.encryptKey,
+            version: "1.0",
+            tags: useLedgerStore
+                .getState()
+                .infos?.meta.tags?.map((v) => v.name)
+                .join(","),
+            currencies: getQuickCurrencies().map((v) => v.label),
+        });
+    };
+    const handleCopyAutojs6Script = () => {
+        if (
+            !relayrConfig?.enable ||
+            !secret ||
+            !relayrConfig.encryptKey ||
+            !import.meta.env.VITE_RELAYR_URL
+        ) {
+            toast.error(t("autojs6-relayr-config-incomplete"));
+            return;
+        }
+
+        let aiConfig: ReturnType<typeof getAIConfig>;
+        try {
+            aiConfig = getAIConfig();
+        } catch (error) {
+            console.error("获取 AI 配置失败:", error);
+            toast.error(t("autojs6-ai-config-required"));
+            return;
+        }
+
+        if (aiConfig.apiType !== "open-ai-compatible") {
+            toast.error(t("autojs6-ai-config-unsupported"));
+            return;
+        }
+
+        const apiKey = decodeApiKey(aiConfig.apiKey).trim();
+        const apiUrl = buildOpenAIChatUrl(aiConfig.apiUrl);
+        const model = aiConfig.model.trim();
+
+        if (!apiKey || !apiUrl || !model) {
+            toast.error(t("autojs6-ai-config-incomplete"));
+            return;
+        }
+
+        try {
+            const configTextValue = buildQuickEntryConfigText();
+            let script = autojs6QuickBillScript;
+            script = replaceScriptStringConfig(
+                script,
+                "centConfigText",
+                configTextValue,
+            );
+            script = replaceScriptStringConfig(script, "apiKey", apiKey);
+            script = replaceScriptStringConfig(script, "apiUrl", apiUrl);
+            script = replaceScriptStringConfig(script, "model", model);
+            copy(script);
+            toast.success(t("autojs6-script-copied"), { duration: 2000 });
+        } catch (error) {
+            console.error("生成 AutoJS6 脚本失败:", error);
+            toast.error(t("autojs6-script-build-failed"));
+        }
     };
 
     return (
@@ -167,27 +262,8 @@ function Form({ onCancel }: { onCancel?: () => void }) {
                                 type="button"
                                 variant="outline"
                                 onClick={async () => {
-                                    const prompt = textToBillSystemPrompt(
-                                        getCategoriesStr(),
-                                        false,
-                                    );
-                                    const configTextValue = JSON.stringify({
-                                        passcode: secret,
-                                        prompt,
-                                        relayrURL: import.meta.env
-                                            .VITE_RELAYR_URL,
-                                        encryptKey: relayrConfig?.encryptKey,
-                                        version: "1.0",
-                                        tags: useLedgerStore
-                                            .getState()
-                                            .infos?.meta.tags?.map(
-                                                (v) => v.name,
-                                            )
-                                            .join(","),
-                                        currencies: getQuickCurrencies().map(
-                                            (v) => v.label,
-                                        ),
-                                    });
+                                    const configTextValue =
+                                        buildQuickEntryConfigText();
                                     setConfigText(configTextValue);
                                     copy(configTextValue);
                                     // 显示复制成功的提示消息，持续时间为 2 秒
@@ -237,9 +313,15 @@ function Form({ onCancel }: { onCancel?: () => void }) {
                         <div className="text-sm font-medium mb-3">
                             {t("android")}
                         </div>
-                        <div className="text-xs opacity-60">
-                            {t("to-be-continued")}
-                        </div>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={handleCopyAutojs6Script}
+                            className="w-full"
+                        >
+                            <i className="icon-[mdi--content-copy] size-4 mr-2"></i>
+                            {t("copy-autojs6-script")}
+                        </Button>
                     </div>
                 )}
 
