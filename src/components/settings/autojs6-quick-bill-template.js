@@ -1,14 +1,14 @@
 // biome-ignore-all lint: AutoJS6 compatibility script
 /**
  * ============================================================
- * Cent 快捷记账 - AutoJs6 版（OCR + AI 文本分析）
+ * Cent 快捷记账 - AutoJs6 版（无障碍/OCR + AI 文本分析）
  * ============================================================
- * 功能：截图 → Paddle OCR 本地识别 → AI 文本分析 → XML → Relayr → Cent
- * 本地 OCR 提取文字（~1秒），AI 只处理纯文本（~2-3秒），总耗时 3-5 秒
+ * 功能：无障碍读取文本（优先）/截图 OCR（兜底）→ AI 文本分析 → XML → Cent Android App
+ * AI 只处理纯文本（~2-3秒），总耗时通常 3-5 秒
  *
  * 前置要求：
  * 1. AutoJs6 已开启无障碍服务、悬浮窗权限
- * 2. Cent 中已开启 Relayr 功能（设置 → 快捷记账 → 开启并复制配置）
+ * 2. 已安装 Cent Android App
  * 3. AI API Key（推荐 DeepSeek）
  *    - DeepSeek: https://platform.deepseek.com/
  *
@@ -23,7 +23,7 @@
 var CONFIG = {
     /**
      * 由 Cent 设置 → 快捷记账 → Android → 复制 AutoJS6 脚本 自动写入
-     * 如果填写了此项，下方的 relayr 和 prompt 将被忽略
+     * 如果填写了此项，下方的 prompt 将被忽略
      */
     centConfigText: "",
 
@@ -44,6 +44,7 @@ var CONFIG = {
      */
     cent: {
         packageName: "work.linkai.cent",
+        deepLinkScheme: "cent-accounting",
         launchWait: 2000,
     },
 
@@ -51,11 +52,6 @@ var CONFIG = {
      * 以下为手动配置项，仅当 centConfigText 为空时生效
      * 建议使用 centConfigText 方式，可自动同步 Cent 端的分类变更
      */
-    relayr: {
-        url: "",
-        passcode: "",
-        encryptKey: "",
-    },
     prompt: "",
 
     /**
@@ -96,9 +92,9 @@ var CONFIG = {
 };
 
 /**
- * 解析 centConfigText，提取 prompt、relayr 配置等
+ * 解析 centConfigText，提取 prompt、Cent 配置等
  * centConfigText 格式由 Cent 快捷记账设置页导出，包含：
- * { passcode, prompt, relayrURL, encryptKey, version, tags, currencies }
+ * { prompt, version, tags, currencies, packageName, deepLinkScheme }
  */
 function parseCentConfig() {
     if (!CONFIG.centConfigText) return;
@@ -112,14 +108,11 @@ function parseCentConfig() {
         if (cfg.prompt) {
             CONFIG.prompt = cfg.prompt;
         }
-        if (cfg.relayrURL) {
-            CONFIG.relayr.url = cfg.relayrURL;
+        if (cfg.packageName) {
+            CONFIG.cent.packageName = cfg.packageName;
         }
-        if (cfg.passcode) {
-            CONFIG.relayr.passcode = cfg.passcode;
-        }
-        if (cfg.encryptKey) {
-            CONFIG.relayr.encryptKey = cfg.encryptKey;
+        if (cfg.deepLinkScheme) {
+            CONFIG.cent.deepLinkScheme = cfg.deepLinkScheme;
         }
     } catch (e) {
         toast("Cent 配置解析失败，请检查格式");
@@ -127,7 +120,136 @@ function parseCentConfig() {
     }
 }
 
-// ==================== 二、截图模块 ====================
+// ==================== 二、文本采集模块 ====================
+
+function normalizeCollectedText(value) {
+    if (value === null || value === undefined) return "";
+    return String(value).replace(/\s+/g, " ").trim();
+}
+
+function appendUniqueLine(lines, seen, value) {
+    var text = normalizeCollectedText(value);
+    if (!text || seen[text]) return;
+    seen[text] = true;
+    lines.push(text);
+}
+
+function getCollectionSize(collection) {
+    if (!collection) return 0;
+    if (typeof collection.size === "function") {
+        return collection.size();
+    }
+    return collection.length || 0;
+}
+
+function getCollectionItem(collection, index) {
+    if (collection && typeof collection.get === "function") {
+        return collection.get(index);
+    }
+    return collection[index];
+}
+
+function collectNodeText(collection, getterName, lines, seen) {
+    var size = getCollectionSize(collection);
+    for (var i = 0; i < size; i++) {
+        var node = getCollectionItem(collection, i);
+        if (!node || typeof node[getterName] !== "function") continue;
+        appendUniqueLine(lines, seen, node[getterName]());
+    }
+}
+
+/**
+ * 支付宝等安全页面可能禁止截图，但无障碍树仍可能暴露金额、商户、时间等文本。
+ */
+function collectTextFromAccessibility() {
+    toast("读取页面文本中...");
+    var lines = [];
+    var seen = {};
+
+    try {
+        collectNodeText(textMatches(/\S+/).find(), "text", lines, seen);
+    } catch (e) {
+        console.warn("读取无障碍 text 失败: " + e.message);
+    }
+
+    try {
+        collectNodeText(descMatches(/\S+/).find(), "desc", lines, seen);
+    } catch (e) {
+        console.warn("读取无障碍 desc 失败: " + e.message);
+    }
+
+    var text = lines.join("\n");
+    if (text) {
+        console.log("无障碍读取文本:\n" + text);
+    }
+    return text;
+}
+
+function hasBillKeyword(text) {
+    var lowerText = text.toLowerCase();
+    var keywords = CONFIG.billKeywords;
+    for (var k = 0; k < keywords.length; k++) {
+        if (lowerText.indexOf(keywords[k]) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function validateCollectedText(text, sourceName) {
+    var trimmed = text ? text.trim() : "";
+    if (!trimmed) {
+        return sourceName + "未识别到文字";
+    }
+    if (trimmed.length < 5) {
+        return sourceName + "内容不足，请确认当前页面是否有可识别的文字";
+    }
+    if (!hasBillKeyword(text)) {
+        return sourceName + "未包含账单关键词，请确认是否停留在支付/账单页面";
+    }
+    return null;
+}
+
+function collectTextFromScreenOcr() {
+    var img = captureScreenImage();
+
+    try {
+        var text = recognizeTextFromImage(img);
+        console.log("OCR 识别文本:\n" + text);
+        return text;
+    } finally {
+        img.recycle();
+    }
+}
+
+function collectBillText() {
+    var accessibilityText = collectTextFromAccessibility();
+    var accessibilityError = validateCollectedText(
+        accessibilityText,
+        "无障碍",
+    );
+    if (!accessibilityError) {
+        toast("无障碍读取页面...");
+        return accessibilityText;
+    }
+
+    console.warn(accessibilityError + "，尝试截图 OCR");
+
+    var ocrText;
+    try {
+        ocrText = collectTextFromScreenOcr();
+    } catch (e) {
+        throw new Error(e.message + "；无障碍结果：" + accessibilityError);
+    }
+    var ocrError = validateCollectedText(ocrText, "OCR");
+    if (!ocrError) {
+        return ocrText;
+    }
+
+    throw new Error(ocrError + "；无障碍结果：" + accessibilityError);
+}
+
+// ==================== 三、截图模块 ====================
 
 var _screenCaptureReady = false;
 var _releaseThread = null;
@@ -193,7 +315,7 @@ function captureScreenImage(retryCount) {
     return img;
 }
 
-// ==================== 三、截图有效性检测 ====================
+// ==================== 四、截图有效性检测 ====================
 
 function isImageBlank(img) {
     var w = img.getWidth();
@@ -214,7 +336,7 @@ function isImageBlank(img) {
     return total > 0 && bright / total < 0.05;
 }
 
-// ==================== 四、OCR 模块 ====================
+// ==================== 五、OCR 模块 ====================
 
 /**
  * 对截图进行 OCR 识别，返回拼接的纯文本
@@ -240,7 +362,7 @@ function recognizeTextFromImage(img) {
     return text;
 }
 
-// ==================== 四、AI 文本分析模块 ====================
+// ==================== 六、AI 文本分析模块 ====================
 
 /**
  * 将 OCR 文本发给 AI，分析账单信息
@@ -257,7 +379,7 @@ function analyzeWithAI(ocrText) {
                 role: "user",
                 content:
                     CONFIG.prompt +
-                    "\n\n以下是 OCR 识别到的屏幕文本内容：\n" +
+                    "\n\n以下是从当前页面识别到的文本内容：\n" +
                     ocrText +
                     '\n\n重要：如果以上文本不包含任何消费、支付、转账等账单相关信息（例如只是桌面图标、应用列表等无关内容），请不要生成任何<Bill>标签，直接回复"未识别到有效账单信息"即可。绝对不要从无关文本中推测或编造账单。',
             },
@@ -282,7 +404,7 @@ function analyzeWithAI(ocrText) {
     throw new Error("无法解析 AI 响应");
 }
 
-// ==================== 五、XML 提取模块 ====================
+// ==================== 七、XML 提取模块 ====================
 
 /**
  * 从 AI 输出中提取 <Bill>...</Bill> 块
@@ -354,106 +476,42 @@ function validateBillXml(xmlContent) {
     return { valid: true };
 }
 
-// ==================== 六、Relayr 写入模块 ====================
+// ==================== 八、唤起 Cent ====================
 
 /**
- * 将 XML 账单写入 Relayr 临时信箱（阅后即焚）
- * Cent 端 _checkRelayrData 通过 GET ?key=<passcode> 读取
+ * 通过 Android deep link 打开本机安装的 Cent Android App，并直接传入 Bill XML。
  */
-function pushToRelayr(xmlContent) {
-    var payload = {
-        content: xmlContent,
-        key: CONFIG.relayr.passcode,
-    };
-
-    if (CONFIG.relayr.encryptKey) {
-        payload.encryptionKey = CONFIG.relayr.encryptKey;
-    }
-
-    var response = http.postJson(CONFIG.relayr.url, payload, {
-        timeout: 15000,
-    });
-    var result = response.body.json();
-
-    if (
-        (result.message || "").toLowerCase().indexOf("success") >= 0 ||
-        (result.message || "").toLowerCase().indexOf("stored") >= 0
-    ) {
-        toast("已写入 Relayr");
-        return true;
-    }
-
-    throw new Error("Relayr 写入异常: " + JSON.stringify(result));
-}
-
-// ==================== 七、唤起 Cent ====================
-
-/**
- * 打开本机安装的 Cent Android App
- * App 回到前台后 useQuickEntryByRelayr 会自动拉取 Relayr 数据并解析入账
- */
-function launchCent() {
+function openCentWithDeepLink(xmlContent) {
     toast("唤起 Cent App...");
-    var packageName = CONFIG.cent.packageName;
     try {
         var Intent = android.content.Intent;
-        var pm = context.getPackageManager();
-        var intent = pm.getLaunchIntentForPackage(packageName);
-        if (!intent) {
-            throw new Error("未安装 Cent App: " + packageName);
-        }
+        var Uri = android.net.Uri;
+        var url =
+            CONFIG.cent.deepLinkScheme +
+            "://add-bills?text=" +
+            encodeURIComponent(xmlContent);
+        var intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
 
+        intent.setPackage(CONFIG.cent.packageName);
         intent.addFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP,
         );
         context.startActivity(intent);
     } catch (e) {
-        throw new Error("无法唤起 Cent App，请确认已安装 release APK");
+        throw new Error(
+            "无法通过 deep link 唤起 Cent App，请确认已安装新版 release APK",
+        );
     }
     sleep(CONFIG.cent.launchWait);
 }
 
-// ==================== 八、主流程 ====================
+// ==================== 九、主流程 ====================
 
 function main() {
     try {
-        var img = captureScreenImage();
+        var pageText = collectBillText();
 
-        var ocrText = recognizeTextFromImage(img);
-        img.recycle();
-
-        console.log("OCR 识别文本:\n" + ocrText);
-
-        if (!ocrText || !ocrText.trim()) {
-            throw new Error("OCR 未识别到文字");
-        }
-        if (
-            ocrText.trim().split("\n").length < 2 ||
-            ocrText.trim().length < 5
-        ) {
-            console.warn("OCR 内容不足，可能受屏幕保护影响:\n" + ocrText);
-            throw new Error(
-                "OCR 识别内容不足，请确认当前页面是否有可识别的文字",
-            );
-        }
-
-        var lowerOcr = ocrText.toLowerCase();
-        var keywords = CONFIG.billKeywords;
-        var hasBillKeyword = false;
-        for (var k = 0; k < keywords.length; k++) {
-            if (lowerOcr.indexOf(keywords[k]) >= 0) {
-                hasBillKeyword = true;
-                break;
-            }
-        }
-        if (!hasBillKeyword) {
-            console.warn("OCR 未包含账单关键词，可能不是账单页面:\n" + ocrText);
-            throw new Error(
-                "当前页面未识别到账单相关信息，请确认是否停留在支付/账单页面",
-            );
-        }
-
-        var aiOutput = analyzeWithAI(ocrText);
+        var aiOutput = analyzeWithAI(pageText);
 
         console.log("AI 原始输出:\n" + aiOutput);
 
@@ -471,15 +529,16 @@ function main() {
 
         console.log("Bill XML:\n" + billXml);
 
-        pushToRelayr(billXml);
-
-        launchCent();
+        openCentWithDeepLink(billXml);
 
         toast("记账流程完成");
     } catch (err) {
         console.error("记账异常:", err);
         toast(err.message || "记账失败");
     } finally {
+        if (!_screenCaptureReady) {
+            return;
+        }
         var delay = CONFIG.screenCaptureReleaseDelay || 0;
         if (delay <= 0) {
             _releaseScreenCapture();
@@ -495,7 +554,7 @@ function main() {
     }
 }
 
-// ==================== 九、配置检查 ====================
+// ==================== 十、配置检查 ====================
 
 var _configReady = false;
 
@@ -512,13 +571,6 @@ function checkConfig() {
         console.error("请填写 CONFIG.ai.apiKey");
         return false;
     }
-    if (!CONFIG.relayr.url || !CONFIG.relayr.passcode) {
-        toast("缺少 Relayr 配置");
-        console.error(
-            "请填写 CONFIG.centConfigText（推荐）或手动填写 relayr.url 和 relayr.passcode",
-        );
-        return false;
-    }
     if (!CONFIG.prompt) {
         toast("缺少 Prompt 配置");
         console.error("请填写 CONFIG.centConfigText（推荐）或手动填写 prompt");
@@ -527,7 +579,7 @@ function checkConfig() {
     return true;
 }
 
-// ==================== 十、触发方式 ====================
+// ==================== 十一、触发方式 ====================
 
 var _busy = false;
 

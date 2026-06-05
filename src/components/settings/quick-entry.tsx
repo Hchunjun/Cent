@@ -122,32 +122,34 @@ function Form({ onCancel }: { onCancel?: () => void }) {
             },
         }));
     };
-    const buildQuickEntryConfigText = () => {
+    const buildQuickEntryBaseConfig = () => {
         const prompt = textToBillSystemPrompt(getCategoriesStr(), false);
-        return JSON.stringify({
-            passcode: secret,
+        return {
             prompt,
-            relayrURL: import.meta.env.VITE_RELAYR_URL,
-            encryptKey: relayrConfig?.encryptKey,
             version: "1.0",
             tags: useLedgerStore
                 .getState()
                 .infos?.meta.tags?.map((v) => v.name)
                 .join(","),
             currencies: getQuickCurrencies().map((v) => v.label),
+        };
+    };
+    const buildQuickEntryConfigText = () => {
+        return JSON.stringify({
+            ...buildQuickEntryBaseConfig(),
+            passcode: secret,
+            relayrURL: import.meta.env.VITE_RELAYR_URL,
+            encryptKey: relayrConfig?.encryptKey,
+        });
+    };
+    const buildAndroidAutojsConfigText = () => {
+        return JSON.stringify({
+            ...buildQuickEntryBaseConfig(),
+            packageName: "work.linkai.cent",
+            deepLinkScheme: "cent-accounting",
         });
     };
     const handleCopyAutojs6Script = () => {
-        if (
-            !relayrConfig?.enable ||
-            !secret ||
-            !relayrConfig.encryptKey ||
-            !import.meta.env.VITE_RELAYR_URL
-        ) {
-            toast.error(t("autojs6-relayr-config-incomplete"));
-            return;
-        }
-
         let aiConfig: ReturnType<typeof getAIConfig>;
         try {
             aiConfig = getAIConfig();
@@ -172,7 +174,7 @@ function Form({ onCancel }: { onCancel?: () => void }) {
         }
 
         try {
-            const configTextValue = buildQuickEntryConfigText();
+            const configTextValue = buildAndroidAutojsConfigText();
             let script = autojs6QuickBillScript;
             script = replaceScriptStringConfig(
                 script,
@@ -308,22 +310,20 @@ function Form({ onCancel }: { onCancel?: () => void }) {
                 )}
 
                 {/* For：Android 区域 */}
-                {enable && secret && (
-                    <div className="w-full px-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                        <div className="text-sm font-medium mb-3">
-                            {t("android")}
-                        </div>
-                        <Button
-                            type="button"
-                            variant="outline"
-                            onClick={handleCopyAutojs6Script}
-                            className="w-full"
-                        >
-                            <i className="icon-[mdi--content-copy] size-4 mr-2"></i>
-                            {t("copy-autojs6-script")}
-                        </Button>
+                <div className="w-full px-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <div className="text-sm font-medium mb-3">
+                        {t("android")}
                     </div>
-                )}
+                    <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleCopyAutojs6Script}
+                        className="w-full"
+                    >
+                        <i className="icon-[mdi--content-copy] size-4 mr-2"></i>
+                        {t("copy-autojs6-script")}
+                    </Button>
+                </div>
 
                 {/* 帮助链接 */}
                 <div className="w-full px-4 pt-4 inline-flex justify-center">
